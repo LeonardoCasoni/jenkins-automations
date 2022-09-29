@@ -1,0 +1,263 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        choice(
+            name:'ORG',
+            description:'Which git repo name do you want to use?',
+            choices: ['none', 'iot', 'cloud']
+        )
+        choice(
+            name:'SPACE',
+            description:'Which environment do you want to use?',
+            choices: ['none', 'develop', 'test', 'next', 'review', 'staging', 'production']
+        )
+        choice(
+            name:'NODEJS',
+            description:'Which NodeJS version do you want to use?',
+            choices: ['nodejs-10.15.3', 'nodejs-16.14.1']
+        )
+        string(
+            name:'GIT_REF',
+            description:'Decide which git branch head or commit id to deploy',
+            defaultValue: 'develop'
+        )
+        string(
+            name:'VERSION',
+            description:'Which version do you want to use? (only with next, staging and production deployment)',
+            defaultValue: 'none'
+        )
+        booleanParam(
+            name:'DOCKER_USAGE',
+            description:'Do you want to use a pre-dockerized and npm installed image?',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'CLEANER',
+            description:'Do you want to use a cleaner workflow? meaning, if false the bluegreen workflow is used... (make sure you manually change the version of the desired deployed apps on cloudfoundry before executing the bluegreen workflow)',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'CLEANUP',
+            description:'Do you want to use a cleanup workflow? will delete all apps, not just the existing apps where the version is different.',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'CONFIRM',
+            description:'Confirm if you really want to deploy on Production, or use DELETE_DATA option',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'WAIT',
+            description:'Only for test environment, a wait of 30 minutes is settle before the deployment starts, to give the time to stop it in case some tests are already running',
+            defaultValue: true
+        )
+    }
+    environment {
+        SSH_KEY_LOCATION = credentials('')
+        SECRETS_ACCOUNT = ''
+        ACCOUNT = '---.ecr.eu-central-1.amazonaws.com'
+        NODEJS = "${params.NODEJS}"
+        GIT_REF = "${params.GIT_REF}"
+        VERSION = "${params.VERSION}"
+        CLEANER = "${params.CLEANER}"
+        REBUILD = "${params.REBUILD}"
+        DOCKER_USAGE = "${params.DOCKER_USAGE}"
+        CONFIRM = "${params.CONFIRM}"
+        WAIT = "${params.WAIT}"
+        ORG = "${params.ORG}"
+        SPACE = "${params.SPACE}"
+        PIPELINE = 'deployment'
+        WEBHOOK_TEAMS = 'https://company.webhook.office.com/webhookb2/ID/JenkinsCI/ID'
+    }
+    stages {
+        stage('Defining repository') {
+            steps {
+                script {
+                    currentBuild.description = "Deployment for ${env.ORG} ${env.SPACE} version ${env.VERSION}"
+                    if (env.ORG == 'iot') {
+                        env.GIT_URL_1='ssh://git@bitbucket.company.com/project/iot-deployment.git'
+                        env.GIT_URL_2='ssh://git@bitbucket.company.com/project/iot-deployer.git'
+                    } else if (env.ORG == 'cloud') {
+                        env.GIT_URL_1='ssh://git@bitbucket.company.com/project/cloud-deployment.git'
+                        env.GIT_URL_2='ssh://git@bitbucket.company.com/project/cloud-deployer.git'
+                    } else {
+                        GIT_URL='none'
+                        sh 'echo "Something went wrong with GIT_URL definition"; exit 1'
+                    }
+                }
+            }
+        }
+        //This step will download the repository for the apps dedicated to deploy the applications
+        stage('Downloading the repositories') {
+            steps {
+                dir('repo/manifests') {
+                    git branch: "$BRANCH_DEPLOYMENT", url: "$GIT_URL_1", credentialsId: ''
+                }
+                dir('repo/deployer') {
+                    git branch: "$BRANCH_DEPLOYER", url: "$GIT_URL_2", credentialsId: ''
+                }
+            }
+        }
+        stage('Defying variables') {
+            steps {
+                office365ConnectorSend webhookUrl: "${env.WEBHOOK_GENERAL}", message: "${env.ORG} ${env.SPACE} deployment is STARTED"
+                script {
+                    if (env.GIT_REF.contains("release/v")) {
+                        env.TAGNAME = sh(script: "echo $GIT_REF | sed s+release/v++g", returnStdout: true).trim()
+                    } else if (env.GIT_REF.contains("feature/")) {
+                        env.TAGNAME = sh(script: "echo $GIT_REF | sed s+feature/++g", returnStdout: true).trim()
+                    } else if (env.GIT_REF.contains("bugfix/")) {
+                        env.TAGNAME = sh(script: "echo $GIT_REF | sed s+bugfix/++g", returnStdout: true).trim()
+                    } else if (env.GIT_REF.contains("hotfix/")) {
+                        env.TAGNAME = sh(script: "echo $GIT_REF | sed s+hotfix/++g", returnStdout: true).trim()
+                    } else {
+                        echo "No needs to modify the tag"
+                        env.TAGNAME = "$GIT_REF"
+                    }
+                    sh "echo $TAGNAME"
+                }
+                script {
+                    if (env.SPACE == 'production') {
+                        echo "Specific variables for $SPACE are selected"
+                        env.CF_CRED=''
+                        env.CF_NAME="prod"
+                        env.DOCKER_REF = "$ACCOUNT/production:$VERSION"
+                    } else {
+                        echo "Generic variables for $SPACE are selected"
+                        env.CF_CRED=''
+                        env.CF_NAME="dev"
+                    }
+                }
+                //Here I can set up specific variables for each environment and safe controls
+                script {
+                    if (env.SPACE == 'staging') {
+                        echo "Specific variables for $SPACE are selected"
+                        env.DOCKER_REF = "$ACCOUNT/production:$VERSION"
+                        echo "STAGING space seems to be selected, so I am checking the CONFIRM option"
+                        sh 'if [ "$CONFIRM" = true ]; then echo "I confirm that CONFIRM is selected"; \
+                        else "CONFIRM is NOT selected, so I quit"; exit 1; fi'
+                    } else if (env.SPACE == 'review') {
+                        echo "Specific variables for $SPACE are selected"
+                        env.DOCKER_REF = "$ACCOUNT/develop:$TAGNAME"
+                    } else if (env.SPACE == 'next') {
+                        echo "Specific variables for $SPACE are selected"
+                        env.DOCKER_REF = "$ACCOUNT/production:$VERSION"
+                    } else if (env.SPACE == 'test') {
+                        echo "Specific variables for $SPACE are selected"
+                        env.DOCKER_REF = "$ACCOUNT/develop:$TAGNAME"
+                        office365ConnectorSend webhookUrl: "${env.WEBHOOK_TEST}", message: "${env.ORG} ${env.SPACE} deployment is STARTED with WAIT=${env.WAIT}"
+                    } else if (env.SPACE == 'develop') {
+                        echo "Specific variables for $SPACE are selected"
+                        env.DOCKER_REF = "$ACCOUNT/develop:$TAGNAME"
+                    } else {
+                        echo "PRODUCTION space seems to be selected, so I am making few checks"
+                        sh 'if [ "$SPACE" = "production" ]; then echo "I confirm that SPACE is production"; \
+                        else "SPACE is NOT production, so I quit"; exit 1; fi;\
+                        if [ "$CONFIRM" = true ]; then echo "I confirm that CONFIRM is selected"; \
+                        else "CONFIRM is NOT selected, so I quit"; exit 1; fi;'
+                    }
+                }
+            }
+        }
+        stage('Moving files') {
+        //Here I will move the files into the volume folder. This folder can be mounted in case you want to perform those scripts in a Docker container
+            steps {
+                dir("$PIPELINE") {
+                    sh 'count=`ls -1 *.sh 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.sh; mv -f *.sh ../volume/; fi;'
+                    sh 'count=`ls -1 *.bash 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.bash; mv -f *.bash ../volume/; fi;'
+                    sh 'count=`ls -1 *.js 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.js; mv -f *.js ../volume/; fi;'
+                }
+            }
+        }
+        stage('Script pre-deployment') {
+            when {
+                expression { params.PRE_DEPLOYMENT == true }
+            }
+            //This example is made to see how you can connect to a Cloud Foundry environment using the cf cli. This specific stage will be performed before the real deployment
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${env.CF_CRED}", passwordVariable: 'CF_API_PW', usernameVariable: 'CF_API_USER')]) {
+                    sh 'cf login -a https://cloud-foundry-url -u "$CF_API_USER" -p "$CF_API_PW" -o "$CF_NAME" -s "$SPACE"; \
+                    volume/pre-"$PIPELINE"-"$ORG".sh'
+                }
+            }
+        }
+        stage('Docker deployment') {
+            when {
+                expression { params.DOCKER_USAGE == true }
+            }
+            steps {
+                dir('repo') {
+                    nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                        withCredentials([usernamePassword(credentialsId: "${env.CF_DEPLOY}", passwordVariable: 'CF_PWD', usernameVariable: 'CF_USER')]) {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                                script {
+                                    env.CF_DOCKER_USERNAME = "${AWS_ACCESS_KEY_ID}"
+                                    env.CF_DOCKER_PASSWORD = "${AWS_SECRET_ACCESS_KEY}"
+                                }
+                                sh '../volume/"$PIPELINE".sh'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Classic deployment') {
+        //This stage will perform a different deployment process not using Docker images always using cf cli for Cloud Foundry
+            when {
+                expression { params.DOCKER_USAGE == false }
+            }
+            steps {
+                dir('repo') {
+                    nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                        withCredentials([usernamePassword(credentialsId: "${env.CF_DEPLOY}", passwordVariable: 'CF_PWD', usernameVariable: 'CF_USER')]) {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                                sh '../volume/"$PIPELINE".sh'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+                sh 'cf logout'
+                sh 'git clean -xdf'
+                office365ConnectorSend webhookUrl: "${env.WEBHOOK_GENERAL}",
+                factDefinitions: [[name: "Deployment", template: "${env.ORG} ${env.SPACE}"]]
+                timeout(time: 10, unit: 'MINUTES') {
+                    build job: 'deployment-confluence', wait: true, parameters: [
+                    string(name: 'ORG', value: "${env.ORG}"),
+                    string(name: 'SPACE', value: "${env.SPACE}"),
+                    string(name: 'GIT_REF', value: "${env.GIT_REF}"),
+                    string(name: 'VERSION', value: "${env.VERSION}"),
+                    string(name: 'RESULT', value: "SUCCESS")
+                    ]
+                }
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAIL'
+                sh 'cf logout'
+                office365ConnectorSend webhookUrl: "${env.WEBHOOK_GENERAL}",
+                factDefinitions: [[name: "Deployment", template: "ERROR: ${env.ORG} ${env.SPACE} deployment FAIL"]]
+                timeout(time: 10, unit: 'MINUTES') {
+                    build job: 'deployment-confluence', wait: true, parameters: [
+                    string(name: 'ORG', value: "${env.ORG}"),
+                    string(name: 'SPACE', value: "${env.SPACE}"),
+                    string(name: 'GIT_REF', value: "${env.GIT_REF}"),
+                    string(name: 'VERSION', value: "${env.VERSION}"),
+                    string(name: 'RESULT', value: "FAIL")
+                    ]
+                }
+            }
+        }
+    }
+}

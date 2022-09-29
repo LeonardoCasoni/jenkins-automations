@@ -1,0 +1,80 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        string(
+            name:'B_FROM',
+            description:'From which BRANCH do you want to merge?',
+            defaultValue: 'none'
+        )
+        choice(
+            name:'B_TO',
+            description:'To which BRANCH do you want to merge?',
+            choices: ['develop', 'master']
+        )
+        string(
+            name:'JIRA_ITEM',
+            description:'Which Jira item do you want to write in the commit message? (eg. TAG-1234)',
+            defaultValue: 'none'
+        )
+    }
+    environment {
+        SSH_KEY_LOCATION = credentials('')
+        B_FROM = "${params.B_FROM}"
+        B_TO = "${params.B_TO}"
+        JIRA_ITEM = "${params.JIRA_ITEM}"
+        PIPELINE = "tools"
+    }
+    stages {
+        stage('Get the Jira number') {
+            //Here I will get the info of the Jira item so I can write it into the PR for Bitbucket
+            steps {
+                script {
+                    if (env.JIRA_ITEM.contains("TAG-")) {
+                        env.JIRA_ITEM_OK = "[$JIRA_ITEM]"
+                    } else if (env.JIRA_ITEM.contains("none")) {
+                        env.JIRA_ITEM_OK = "AUTOMATIC"
+                    } else {
+                        env.JIRA_ITEM_OK = sh(script: "echo $JIRA_ITEM | sed s+$JIRA_ITEM+[TAG-$JIRA_ITEM]+g", returnStdout: true).trim()
+                    }
+                    sh "echo $JIRA_ITEM_OK"
+                }
+                script {
+                    currentBuild.description = "PR ${env.B_FROM} into ${env.B_TO}"
+                }
+            }
+        }
+        stage('Moving files') {
+            steps {
+                dir("$PIPELINE") {
+                    sh 'chmod 777 *.sh; mv -f *.sh ../volume/'
+                }
+            }
+        }
+        stage('Creating the PR') {
+            steps {
+                dir("$PIPELINE") {
+                    withCredentials([usernamePassword(credentialsId: '', usernameVariable: 'BITB_USER', passwordVariable: 'BITB_PASSWORD')]) {
+                        sh 'git clean -xdf'
+                        sh '../volume/jenkins_automations_pull_request.sh'
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAIL'
+            }
+        }
+    }
+}

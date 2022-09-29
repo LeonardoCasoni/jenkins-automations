@@ -1,0 +1,78 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        string(
+            name:'GIT_REF',
+            description:'Decide which git branch head or commit id to deploy',
+            defaultValue: 'develop'
+        )
+        booleanParam(
+            name:'CREATE_NEW_DOCKER_IMAGE',
+            description:'Do you want to create a new Docker image before the deployment?',
+            defaultValue: false
+        )
+    }
+    environment {
+        SSH_KEY_LOCATION = credentials('')
+        NODEJS = 'nodejs-10.15.3'
+        GIT_REF = "${params.GIT_REF}"
+        VERSION = "no-version"
+        ECR_NAME = "develop"
+        BRANCH_DEPLOYMENT = "master"
+        BRANCH_DEPLOYER = "master"
+        PRE_DEPLOYMENT = true
+        POST_DEPLOYMENT = false
+        CLEANER = true
+        CLEANUP = true
+        DELETE_DATA = false
+        REBUILD = false
+        DOCKER_USAGE = true
+        CONFIRM = false
+        WAIT = false
+        ORG = ""
+        SPACE = "develop"
+    }
+    stages {
+        stage('Creating the Docker image') {
+            when {
+                expression { params.CREATE_NEW_DOCKER_IMAGE == true }
+            }
+            steps {
+                timeout(time: 40, unit: 'MINUTES') {
+                    build job: 'docker', wait: true, parameters: [
+                    string(name: 'BRANCH', value: "$GIT_REF"),
+                    string(name: 'ECR_NAME', value: "$ECR_NAME")
+                    ]
+                }
+            }
+        }
+        stage('Starting the deployment') {
+            steps {
+                timeout(time: 60, unit: 'MINUTES') {
+                    build job: 'deployment-main', wait: true, parameters: [
+                    string(name: 'ORG', value: "$ORG"),
+                    string(name: 'SPACE', value: "$SPACE"),
+                    string(name: 'GIT_REF', value: "$GIT_REF"),
+                    string(name: 'NODEJS', value: "$NODEJS"),
+                    string(name: 'VERSION', value: "$VERSION"),
+                    string(name: 'BRANCH_DEPLOYMENT', value: "$BRANCH_DEPLOYMENT"),
+                    string(name: 'BRANCH_DEPLOYER', value: "$BRANCH_DEPLOYER"),
+                    booleanParam(name: 'DOCKER_USAGE', value: "$DOCKER_USAGE"),
+                    booleanParam(name: 'CLEANER', value: "$CLEANER"),
+                    booleanParam(name: 'CLEANUP', value: "$CLEANUP"),
+                    booleanParam(name: 'DELETE_DATA', value: "$DELETE_DATA"),
+                    booleanParam(name: 'REBUILD', value: "$REBUILD"),
+                    booleanParam(name: 'PRE_DEPLOYMENT', value: "$PRE_DEPLOYMENT"),
+                    booleanParam(name: 'POST_DEPLOYMENT', value: "$POST_DEPLOYMENT"),
+                    booleanParam(name: 'CONFIRM', value: "$CONFIRM"),
+                    booleanParam(name: 'WAIT', value: "$WAIT")
+                    ]
+                }
+            }
+        }
+    }
+}

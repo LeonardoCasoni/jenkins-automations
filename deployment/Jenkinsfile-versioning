@@ -1,0 +1,89 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        choice(
+            name:'ORG',
+            description:'Which git repo name do you want to use?',
+            choices: ['none', 'iot', 'cloud']
+        )
+        string(
+            name:'VERSION',
+            description:'Which version do you want to use? (only with next, staging and production deployment)',
+            defaultValue: 'none'
+        )
+        string(
+            name:'JIRA_ITEM',
+            description:'Which Jira item do you want to write in the commit message? (eg. TAG-1234)',
+            defaultValue: 'none'
+        )
+    }
+    environment {
+        VERSION = "${params.VERSION}"
+        JIRA_ITEM = "${params.JIRA_ITEM}"
+        ORG = "${params.ORG}"
+    }
+    stages {
+        stage('Defining repository') {
+            steps {
+                //Here I will get the Jira information to create the name for the Pull Request in Bitbucket
+                script {
+                    if (env.JIRA_ITEM.contains("TAG-")) {
+                        env.JIRA_ITEM_OK = "[$JIRA_ITEM]"
+                    } else if (env.JIRA_ITEM.contains("none")) {
+                        env.JIRA_ITEM_OK = "AUTOMATIC"
+                    } else {
+                        env.JIRA_ITEM_OK = sh(script: "echo $JIRA_ITEM | sed s+$JIRA_ITEM+[TAG-$JIRA_ITEM]+g", returnStdout: true).trim()
+                    }
+                    sh "echo $JIRA_ITEM_OK"
+                }
+            }
+        }
+        stage('Checking infos and moving files') {
+            steps {
+                dir("deployment") {
+                    sh 'count=`ls -1 *.sh 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.sh; mv -f *.sh ../volume/; fi;'
+                    sh 'count=`ls -1 *.bash 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.bash; mv -f *.bash ../volume/; fi;'
+                    sh 'count=`ls -1 *.js 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.js; mv -f *.js ../volume/; fi;'
+                }
+            }
+        }
+        stage('Versioning cloud') {
+            //Here I can download the repo, make the change for the versioning, and create a pull request on Bitbucket
+            steps {
+                dir('repo') {
+                    withCredentials([usernamePassword(credentialsId: '', usernameVariable: 'BITB_USER', passwordVariable: 'BITB_PASSWORD')]) {
+                        sh 'git clean -xdf'
+                        git branch: "release/v${env.VERSION}", url: "ssh://git@bitbucket.company.com/project/${env.ORG}.git", credentialsId: ''
+                        sh '../volume/versioning_repo.sh'
+                        sh "echo \"Committing changes to Bitbucket ${env.ORG}-cloud\""
+                        sshagent(credentials: ['jenkins_push_key']) {
+                            sh 'git config --global user.name "Jenkins"'
+                            sh 'git config --global user.email jenkins@example.com'
+                            sh 'git add .'
+                            sh "git commit -am \"${env.JIRA_ITEM_OK} Versioning made by Jenkins ${env.VERSION}\""
+                            sh "git push origin release/v${env.VERSION}"
+                            sh 'git clean -xdf'
+                        }
+                        sh '../volume/versioning_pull_request.sh cloud develop'
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAIL'
+            }
+        }
+    }
+}

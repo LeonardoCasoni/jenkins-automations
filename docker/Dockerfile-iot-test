@@ -1,0 +1,51 @@
+FROM node:16
+
+RUN npm set unsafe-perm true \
+    && mkdir /usr/src/iot \
+    && mkdir /usr/src/cloud
+
+WORKDIR /usr/src/cloud
+
+COPY cloud .
+
+#RUN pwd \
+#    && ls -l \
+#    && npm install
+
+WORKDIR /usr/src/iot
+
+RUN uname -a \
+    && apt-get update \
+    && apt-get install -y \
+    apt-utils \
+    software-properties-common \
+    curl \
+    gnupg \
+    ca-certificates \
+    lsb-release \
+    && apt update
+
+RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 7EA0A9C3F273FCD8 \
+    && add-apt-repository "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
+    && apt-get update \
+    && apt-get install -y --allow-unauthenticated docker-ce docker-ce-cli containerd.io
+
+#RUN dockerd --iptables=false \
+#    && sleep 30 \
+#    && docker run hello-world
+
+COPY iot .
+
+ENV PATH=$PATH:/usr/src/iot/node_modules/.bin
+
+RUN pwd \
+    && ls -l \
+    && npm install \
+    && which pm2 || npm i pm2 \
+    && npm i grunt-cli \
+    && npm i gulp-cli \
+    && grunt -V
+
+RUN grunt dev:install
+
+CMD ["/bin/bash", "-c", "cd cloud/development;npm start"]

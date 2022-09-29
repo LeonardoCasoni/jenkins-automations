@@ -1,0 +1,87 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        choice(
+            name:'ORG',
+            description:'Which git repo name do you want to use?',
+            choices: ['none', 'cloud']
+        )
+        choice(
+            name:'SPACE',
+            description:'Which environment do you want to use?',
+            choices: ['none', 'develop', 'test', 'review', 'next']
+        )
+        booleanParam(
+            name:'REMOVE_APP',
+            description:'Do you want to remove the app?',
+            defaultValue: true
+        )
+        booleanParam(
+            name:'REMOVE_DBS',
+            description:'Do you want to remove the databases?',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'CONFIRM',
+            description:'Confirm if you really want to undeploy an environment',
+            defaultValue: false
+        )
+    }
+    environment {
+        REMOVE_APP = "${params.REMOVE_APP}"
+        REMOVE_DBS = "${params.REMOVE_DBS}"
+        CONFIRM = "${params.CONFIRM}"
+        ORG = "${params.ORG}"
+        SPACE = "${params.SPACE}"
+        PIPELINE = 'deployment'
+    }
+    stages {
+        stage('Defying variables') {
+            steps {
+                script {
+                    echo "The UNdeployment of a space seems to be selected, so I am making few checks"
+                    sh 'if [ "$CONFIRM" = true ]; then echo "I confirm that CONFIRM is selected"; \
+                    else "CONFIRM is NOT selected, so I quit"; exit 1; fi;'
+                    echo "Generic variables for $SPACE are selected"
+                    env.CF_CRED='user-dev'
+                    env.CF_NAME="dev"
+                }
+            }
+        }
+        stage('Moving files') {
+            steps {
+                dir("$PIPELINE") {
+                    sh 'count=`ls -1 *.sh 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.sh; mv -f *.sh ../volume/; fi;'
+                    sh 'count=`ls -1 *.bash 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.bash; mv -f *.bash ../volume/; fi;'
+                    sh 'count=`ls -1 *.js 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.js; mv -f *.js ../volume/; fi;'
+                }
+            }
+        }
+        stage('Undeployment') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${env.CF_CRED}", passwordVariable: 'CF_API_PW', usernameVariable: 'CF_API_USER')]) {
+                    sh 'cf login -a https://cloudfoundry -u "$CF_API_USER" -p "$CF_API_PW" -o "$CF_NAME" -s "$SPACE"; \
+                    volume/"$PIPELINE"-undeployment.sh'
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+                sh 'cf logout'
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAIL'
+                sh 'cf logout'
+            }
+        }
+    }
+}

@@ -1,0 +1,75 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        string(
+            name: 'BRANCH',
+            description: 'Which git branch do you want to use?',
+            defaultValue: 'develop'
+        )
+        choice(
+            name:'ECR_NAME',
+            description:'Where do you want to use the image? develop=(develop, test, review) production=(next, staging, production)',
+            choices: ['develop', 'production']
+        )
+    }
+    environment {
+        NPM_TOKEN = credentials('')
+        ACCOUNT = '---.ecr.eu-central-1.amazonaws.com'
+        BRANCH = "${params.BRANCH}"
+        ECR_NAME = "${params.ECR_NAME}"
+        ORG = ""
+        PRODUCT = ""
+        IMAGE = "$PRODUCT-$ECR_NAME"
+        PIPELINE = "docker"
+    }
+    stages {
+        stage('Downloading the repository') {
+            steps {
+                dir('repo') {
+                    git branch: "$BRANCH", url: "ssh://git@bitbucket.company.com/project/repository-name.git", credentialsId: ''
+                }
+            }
+        }
+        stage('Create Docker Image') {
+            steps {
+                script {
+                    dir('repo') {
+                        sh 'docker build -t $IMAGE --file docker/Dockerfile --build-arg NPM_TOKEN=${NPM_TOKEN} .'
+                    }
+                }
+            }
+        }
+        stage('Pushing Docker image to ECR') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    sh 'aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin $ACCOUNT'
+                    sh 'if ( echo $BRANCH | grep "release/v" ); then TAG=$(echo $BRANCH | sed s+release/v++g); \
+                    elif ( echo $BRANCH | grep "feature/" ); then TAG=$(echo $BRANCH | sed s+feature/++g); \
+                    elif ( echo $BRANCH | grep "bugfix/" ); then TAG=$(echo $BRANCH | sed s+bugfix/++g); \
+                    elif ( echo $BRANCH | grep "hotfix/" ); then TAG=$(echo $BRANCH | sed s+hotfix/++g); \
+                    else echo No needs to modify the tag; TAG="$BRANCH"; \
+                    fi; echo DEVOPS Check: Docker TAG:$TAG; \
+                    docker tag $IMAGE:latest $ACCOUNT/$IMAGE:$TAG; docker push $ACCOUNT/$IMAGE:$TAG'
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+                sh 'git clean -xdf'
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAILURE'
+                sh 'git clean -xdf'
+            }
+        }
+    }
+}

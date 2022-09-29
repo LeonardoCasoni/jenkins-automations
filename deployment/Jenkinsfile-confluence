@@ -1,0 +1,56 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+    }
+    agent { label 'dynamic' }
+    parameters {
+        choice(
+            name:'ORG',
+            description:'Which git repo name do you want to use?',
+            choices: ['none', 'iot', 'cloud']
+        )
+        choice(
+            name:'SPACE',
+            description:'Which environment do you want to use?',
+            choices: ['none', 'develop', 'test', 'next', 'review', 'staging', 'production']
+        )
+        string(
+            name:'GIT_REF',
+            description:'Decide which git branch head or commit id to deploy',
+            defaultValue: 'develop'
+        )
+        string(
+            name:'VERSION',
+            description:'Which version do you want to use? (only with next, staging and production deployment)',
+            defaultValue: 'none'
+        )
+        string(
+            name:'SERVICE',
+            description:'Which service do you want to select? leave "all" if you performed the cleaner workflow, or write manually (if you want to put more than one, just separate them with a space eg. app1 app2/code) ',
+            defaultValue: 'all'
+        )
+        choice(
+            name:'RESULT',
+            description:'Which is the result of the deployment?',
+            choices: ['FAIL', 'SUCCESS']
+        )
+    }
+    environment {
+        CONFLUENCE_BASE = 'https://confluence.company.com'
+        ORG = "${params.ORG}"
+        SPACE = "${params.SPACE}"
+        GIT_REF = "${params.GIT_REF}"
+        VERSION = "${params.VERSION}"
+        SERVICE = "${params.SERVICE}"
+        RESULT = "${params.RESULT}"
+    }
+    stages {
+        stage('Testing confluence upload') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: '', usernameVariable: 'CONFL_USER_NAME', passwordVariable: 'CONFL_USER_PASSWORD')]) {
+                    sh 'chmod 777 deployment/confluence.sh; deployment/confluence.sh'
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,267 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+    }
+    agent { label 'deploy' }
+    parameters {
+        choice(
+            name:'ORG',
+            description:'Which git repo name do you want to use?',
+            choices: ['none', 'cloud', 'iot', 'iot-modules']
+        )
+        string(
+            name:'GIT_REF',
+            description:'Decide which git branch head or commitid to deploy',
+            defaultValue: 'develop'
+        )
+        choice(
+            name:'NODEJS',
+            description:'Which NodeJS version do you want to use?',
+            choices: ['nodejs-16.14.1', 'nodejs-12.22.7', 'nodejs-10.24.1', 'nodejs-10.15.3']
+        )
+        booleanParam(
+            name:'DOCKER_USAGE',
+            description:'Do you want to use a pre-dockerized and np installed image?',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'UNIT',
+            description:'Do you want to execute UNIT test?',
+            defaultValue: true
+        )
+        booleanParam(
+            name:'INTEGRATION',
+            description:'Do you want to execute INTEGRATION test?',
+            defaultValue: false
+        )
+        booleanParam(
+            name:'PRE_TEST',
+            description:'Do you want to use the pre-test script?',
+            defaultValue: true
+        )
+        booleanParam(
+            name:'POST_TEST',
+            description:'Do you want to use the post-test script?',
+            defaultValue: true
+        )
+    }
+    environment {
+        ACCOUNT = '---.ecr.eu-central-1.amazonaws.com'
+        NODEJS = "${params.NODEJS}"
+        GIT_REF = "${params.GIT_REF}"
+        BRANCH1='develop'
+        BRANCH2='develop'
+        BRANCH3='master'
+        GIT_URL_1='ssh://git@bitbucket.company.com/project/iot.git'
+        GIT_URL_2='ssh://git@bitbucket.company.com/project/cloud.git'
+        GIT_URL_3='ssh://git@bitbucket.company.com/project/iot-modules.git'
+        DOCKER_USAGE = "${params.DOCKER_USAGE}"
+        UNIT="${params.UNIT}"
+        INTEGRATION="${params.INTEGRATION}"
+        ORG = "${params.ORG}"
+        TAG = "${params.ORG}-develop"
+        PIPELINE = 'code-test'
+    }
+    stages {
+        stage('Defining repository') {
+            //You may need more than one repository to perform tests, so here there is an example with 3 repositories iot, cloud and iot-modules
+            steps {
+                script {
+                    currentBuild.description = "Code testing for ${env.ORG}"
+                    if (env.ORG == 'iot') {
+                        env.BRANCH1="${env.GIT_REF}"
+                        env.GIT_URL_1="ssh://git@bitbucket.company.com/project/${env.ORG}.git"
+                    } else if (env.ORG == 'cloud') {
+                        env.BRANCH2="${env.GIT_REF}"
+                        env.GIT_URL_2="ssh://git@bitbucket.company.com/project/${env.ORG}.git"
+                    } else if (env.ORG == 'iot-modules') {
+                        env.BRANCH3="${env.GIT_REF}"
+                        env.GIT_URL_3="ssh://git@bitbucket.company.com/project/${env.ORG}.git"
+                    } else {
+                        ORG='none'
+                        sh 'echo "Something went wrong with ORG definition"; exit 1'
+                    }
+                }
+            }
+        }
+        stage('Downloading the repositories') {
+            steps {
+                dir('repo/iot') {
+                    git branch: "$BRANCH1", url: "$GIT_URL_1", credentialsId: ''
+                }
+                dir('repo/cloud') {
+                    git branch: "$BRANCH2", url: "$GIT_URL_2", credentialsId: ''
+                }
+                dir('repo/iot-modules') {
+                    git branch: "$BRANCH3", url: "$GIT_URL_3", credentialsId: ''
+                }
+            }
+        }
+        stage('Preparing files and Stages') {
+            steps {
+                dir("$PIPELINE") {
+                    sh 'count=`ls -1 *.sh 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.sh; mv -f *.sh ../volume/; fi;'
+                    sh 'count=`ls -1 *.bash 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.bash; mv -f *.bash ../volume/; fi;'
+                    sh 'count=`ls -1 *.js 2>/dev/null | wc -l`; if [ $count != 0 ]; then chmod 777 *.js; mv -f *.js ../volume/; fi;'
+                }
+            }
+        }
+        stage('Is Docker required?') {
+            //If you have a Docker image that you can use for test, you can do it and all the script will be mounted in /volume in that container
+            when {
+                expression { params.DOCKER_USAGE == true }
+            }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    sh 'aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin $ACCOUNT'
+                    sh 'TAG=$(echo $TAG | sed s+/+-+); docker pull $ACCOUNT/$IMAGE:$TAG'
+                }
+            }
+        }
+        stage('Starting Docker container with pre and post scripts') {
+            when {
+                expression { params.DOCKER_USAGE == true }
+            }
+            steps {
+                script {
+                    sh 'HOME=$(pwd); TAG=$(echo $TAG | sed s+/+-+); \
+                    docker run --env-file $PIPELINE/env.list \
+                    -v /var/run/docker.sock:/var/run/docker.sock \
+                    -v $(which docker):$(which docker) \
+                    -v $HOME/volume:/volume \
+                    --name $IMAGE -d -t $ACCOUNT/$IMAGE:$TAG; \
+                    sleep 5; \
+                    docker ps -a; \
+                    docker exec $IMAGE /volume/pre-"$PIPELINE"-"$ORG".sh; \
+                    docker exec $IMAGE /volume/"$PIPELINE"-"$ORG".sh; \
+                    docker exec $IMAGE /volume/post-"$PIPELINE"-"$ORG".sh'
+                }
+            }
+        }
+        stage('Script pre-test') {
+            when {
+                allOf {
+                    expression { params.DOCKER_USAGE == false }
+                    expression { params.PRE_TEST == true }
+                }
+            }
+            steps {
+                timeout(time: 50, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                            sh '../../volume/pre-"$PIPELINE"-"$ORG".sh'
+                        }
+                    }
+                }
+            }
+        }
+        stage('Unit tests') {
+            when {
+                allOf {
+                    expression { params.DOCKER_USAGE == false }
+                    expression { params.UNIT == true }
+                }
+            }
+            steps {
+                timeout(time: 20, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                                sh '../../volume/"$PIPELINE"-"$ORG"-unit.sh'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Preparation for other tests') {
+            when {
+                allOf {
+                    expression { params.DOCKER_USAGE == false }
+                    expression { params.ORG == "cloud" || params.ORG == "iot" }
+                    expression { params.INTEGRATION == true }
+                }
+            }
+            steps {
+                timeout(time: 20, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                                sh '../../volume/"$PIPELINE"-"$ORG"-start.sh'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Integration tests') {
+            when {
+                allOf {
+                    expression { params.DOCKER_USAGE == false }
+                    expression { params.ORG == "cloud" || params.ORG == "iot" }
+                    expression { params.INTEGRATION == true }
+                }
+            }
+            steps {
+                timeout(time: 60, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                                sh '../../volume/"$PIPELINE"-"$ORG"-integration.sh'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Closing the tests') {
+            when {
+                allOf {
+                    expression { params.DOCKER_USAGE == false }
+                    expression { params.ORG == "cloud" || params.ORG == "iot" }
+                    expression { params.INTEGRATION == true }
+                }
+            }
+            steps {
+                timeout(time: 20, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "", accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                                sh '../../volume/"$PIPELINE"-"$ORG"-end.sh'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Script post-test') {
+            when {
+                allOf {
+                    expression { params.DOCKER_USAGE == false }
+                    expression { params.POST_TEST == true }
+                }
+            }
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        sh '../../volume/post-"$PIPELINE"-"$ORG".sh'
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+                sh 'git clean -xdf'
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAILURE'
+                sh 'git clean -xdf'
+            }
+        }
+    }
+}

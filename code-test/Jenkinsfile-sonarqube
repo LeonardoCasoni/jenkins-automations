@@ -1,0 +1,117 @@
+pipeline {
+    options {
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+    agent { label 'dynamic' }
+    parameters {
+        choice(
+            name:'ORG',
+            description:'Decide which repository you want to test (cloud or iot)',
+            choices: ['none', 'cloud', 'iot', 'iot-modules']
+        )
+        string(
+            name:'GIT_REF',
+            description:'Decide which git branch you want to test',
+            defaultValue: 'develop'
+        )
+        choice(
+            name:'NODEJS',
+            description:'Which NodeJS version do you want to use?',
+            choices: ['nodejs-16.14.1', 'nodejs-12.22.7', 'nodejs-10.24.1', 'nodejs-10.15.3']
+        )
+        string(
+            name:'IDNUM',
+            description:'ID number in case of PR request. Used only for automatic trigger from Bitbucket',
+            defaultValue: 'base'
+        )
+    }
+    environment {
+        NODEJS = "${params.NODEJS}"
+        GIT_REF = "${params.GIT_REF}"
+        IDNUM = "${params.IDNUM}"
+        ORG = "${params.ORG}"
+        PIPELINE = 'code-test'
+    }
+    stages {
+        stage('Downloading the repository') {
+            steps {
+                dir("repo/$ORG") {
+                    script {
+                        currentBuild.description = "Code testing for ${env.ORG}"
+                        env.SONARQUBE_PROJECT_KEY = "$ORG"
+                        if (env.ORG == 'iot') {
+                            env.GIT_URL_1="ssh://git@bitbucket.company.com/project/${env.ORG}-cloud.git"
+                            env.GIT_REF_OK="$GIT_REF"
+                        } else if (env.ORG == 'cloud') {
+                            env.GIT_URL_1="ssh://git@bitbucket.company.com/project/${env.ORG}-cloud.git"
+                            env.GIT_REF_OK="$GIT_REF"
+                        } else if (env.ORG == 'iot-modules') {
+                            env.GIT_URL_1="ssh://git@bitbucket.company.com/project/${env.ORG}.git"
+                            if (env.GIT_REF == 'develop') {
+                                env.GIT_REF_OK="master"
+                            } else {
+                                env.GIT_REF_OK="$GIT_REF"
+                            }
+                        } else {
+                            sh "echo 'Need to select a ORG variable' && exit 1"
+                        }
+                    }
+                    git branch: "$GIT_REF_OK", url: "$GIT_URL_1", credentialsId: ''
+                }
+            }
+        }
+        stage('SonarQube analisys') {
+            steps {
+                timeout(time: 60, unit: 'MINUTES') {
+                    dir("repo/$ORG") {
+                        nodejs(nodeJSInstallationName: "${env.NODEJS}") {
+                            withSonarQubeEnv("sonarqube") {
+                                script {
+                                    notifyBitbucket()
+                                    if ("$IDNUM"!="base") {
+                                        sh "${tool('SonarQube Scanner')}/bin/sonar-scanner \
+                                        -Dsonar.projectKey='$SONARQUBE_PROJECT_KEY' -X \
+                                        -Dsonar.pullrequest.key='$IDNUM' \
+                                        -Dsonar.pullrequest.branch='$GIT_REF_OK' \
+                                        -Dsonar.pullrequest.base=develop"
+                                    } else {
+                                        sh "${tool('SonarQube Scanner')}/bin/sonar-scanner \
+                                        -Dsonar.projectKey='$SONARQUBE_PROJECT_KEY' -X \
+                                        -Dsonar.branch.name='$GIT_REF_OK'"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('SonarQube Quality Gate') {
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    script {
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK') {
+                            error "Pipeline aborted"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            script {
+                currentBuild.result = 'SUCCESS'
+                sh 'git clean -xdf'
+            }
+        }
+        failure {
+            script {
+                currentBuild.result = 'FAILURE'
+                sh 'git clean -xdf'
+            }
+        }
+    }
+}
